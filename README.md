@@ -1,4 +1,4 @@
-# AI Server Notify
+# AI 服务器通知
 
 通过 [ntfy](https://ntfy.sh/) 将服务器上的 Codex、Claude Code 和 `tmux` 长任务状态推送到 Windows 通知中心。PowerShell、SSH、VS Code 可以最小化或关闭，不必反复打开终端查看 AI 是否已经完成。
 
@@ -16,9 +16,9 @@
 | 训练、评估或脚本成功/失败/中断 | `notify-run` 捕获真实退出码 |
 
 ```text
-Codex notify ───────────┐
-Claude Hooks ───────────┤
-tmux / shell command ───┼──> ai-notify ──> ntfy ──> Windows / 手机
+Codex 完成通知 ─────────┐
+Claude Code 钩子 ───────┤
+tmux / Shell 命令 ──────┼──> ai-notify ──> ntfy ──> Windows / 手机
                        ┘
 ```
 
