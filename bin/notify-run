@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+usage() {
+  printf 'Usage: notify-run --name TASK_NAME -- COMMAND [ARG ...]\n' >&2
+}
+
+task_name=""
+if [[ "${1:-}" == "--name" && -n "${2:-}" ]]; then
+  task_name="$2"
+  shift 2
+fi
+if [[ "${1:-}" != "--" || -z "$task_name" ]]; then
+  usage
+  exit 2
+fi
+shift
+if [[ "$#" -eq 0 ]]; then
+  usage
+  exit 2
+fi
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+notifier="${AI_NOTIFY_BIN:-}"
+if [[ -z "$notifier" ]]; then
+  notifier=$(command -v ai-notify 2>/dev/null || true)
+fi
+if [[ -z "$notifier" && -x "${script_dir}/ai-notify" ]]; then
+  notifier="${script_dir}/ai-notify"
+fi
+
+started_at=$(date +%s)
+
+notify_on_exit() {
+  local exit_code=$?
+  local ended_at elapsed status
+  trap - EXIT INT TERM
+  ended_at=$(date +%s)
+  elapsed=$((ended_at - started_at))
+  if [[ "$exit_code" -eq 0 ]]; then
+    status="success"
+  elif [[ "$exit_code" -eq 130 || "$exit_code" -eq 143 ]]; then
+    status="interrupted"
+  else
+    status="failure"
+  fi
+  if [[ -n "$notifier" ]]; then
+    "$notifier" task "$status" "$task_name" "$exit_code" "$elapsed" >/dev/null 2>&1 || true
+  else
+    printf 'Warning: ai-notify was not found; no notification was sent.\n' >&2
+  fi
+  exit "$exit_code"
+}
+
+trap notify_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+"$@"
