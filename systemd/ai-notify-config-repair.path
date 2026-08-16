@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch Codex and Claude configuration for ai-notify hook drift
+
+[Path]
+PathChanged=%h/.codex/config.toml
+PathChanged=%h/.claude/settings.json
+Unit=ai-notify-config-repair.service
+
+[Install]
+WantedBy=default.target

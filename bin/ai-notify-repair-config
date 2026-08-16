@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""Restore ai-notify hooks after configuration managers rewrite client config."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+import tomllib
+from logging import Formatter, getLogger
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Any
+
+HOME = Path.home()
+DEFAULT_CODEX_CONFIG = HOME / ".codex" / "config.toml"
+DEFAULT_CLAUDE_SETTINGS = HOME / ".claude" / "settings.json"
+DEFAULT_LOG = HOME / ".local" / "state" / "ai-notify" / "repair.log"
+CODEX_NOTIFY = [str(HOME / ".local" / "bin" / "ai-notify"), "codex"]
+
+
+def command_hook(source: str) -> dict[str, Any]:
+    return {
+        "type": "command",
+        "command": f"{HOME / '.local' / 'bin' / 'ai-notify'} {source}",
+        "timeout": 10,
+        "async": True,
+    }
+
+
+CLAUDE_HOOKS: dict[str, list[dict[str, Any]]] = {
+    "PermissionRequest": [{"hooks": [command_hook("claude-permission")]}],
+    "Notification": [
+        {
+            "matcher": "agent_needs_input",
+            "hooks": [command_hook("claude-needs-input")],
+        },
+        {
+            "matcher": "elicitation_dialog",
+            "hooks": [command_hook("claude-needs-input")],
+        },
+        {
+            "matcher": "elicitation_url_dialog",
+            "hooks": [command_hook("claude-needs-input")],
+        },
+    ],
+    "Stop": [{"hooks": [command_hook("claude-stop")]}],
+    "StopFailure": [{"hooks": [command_hook("claude-failure")]}],
+    "SessionEnd": [{"hooks": [command_hook("claude-session-end")]}],
+}
+
+
+def build_logger(log_path: Path):
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log = getLogger("ai-notify-config-repair")
+    if not log.handlers:
+        handler = RotatingFileHandler(log_path, maxBytes=500_000, backupCount=2)
+        handler.setFormatter(Formatter("%(asctime)s %(levelname)s %(message)s"))
+        log.addHandler(handler)
+        log.setLevel("INFO")
+    return log
+
+
+def wait_until_stable(path: Path, attempts: int = 8, delay: float = 0.15) -> None:
+    previous: tuple[int, int] | None = None
+    for _ in range(attempts):
+        stat = path.stat()
+        current = (stat.st_mtime_ns, stat.st_size)
+        if current == previous:
+            return
+        previous = current
+        time.sleep(delay)
+    raise RuntimeError(f"configuration file did not become stable: {path}")
+
+
+def atomic_write(path: Path, content: str) -> None:
+    stat = path.stat()
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_path, stat.st_mode & 0o777)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def codex_is_valid(raw: str) -> bool:
+    parsed = tomllib.loads(raw)
+    return parsed.get("notify") == CODEX_NOTIFY
+
+
+def repaired_codex(raw: str) -> str:
+    tomllib.loads(raw)
+    lines = raw.splitlines(keepends=True)
+    table_index = next(
+        (index for index, line in enumerate(lines) if line.lstrip().startswith("[")),
+        len(lines),
+    )
+    notify_pattern = re.compile(r"^\s*notify\s*=")
+    notify_line = f"notify = {json.dumps(CODEX_NOTIFY, ensure_ascii=True)}\n"
+
+    for index, line in enumerate(lines[:table_index]):
+        if notify_pattern.match(line):
+            lines[index] = notify_line
+            break
+    else:
+        insert_at = table_index
+        while insert_at > 0 and not lines[insert_at - 1].strip():
+            insert_at -= 1
+        lines[insert_at:insert_at] = [notify_line, "\n"]
+
+    result = "".join(lines)
+    if not codex_is_valid(result):
+        raise RuntimeError("generated Codex configuration failed validation")
+    return result
+
+
+def hook_commands(entry: dict[str, Any]) -> set[str]:
+    hooks = entry.get("hooks")
+    if not isinstance(hooks, list):
+        return set()
+    return {
+        hook.get("command")
+        for hook in hooks
+        if isinstance(hook, dict) and isinstance(hook.get("command"), str)
+    }
+
+
+def hook_identities(entry: dict[str, Any]) -> set[tuple[str | None, str]]:
+    matcher = entry.get("matcher")
+    normalized_matcher = matcher if isinstance(matcher, str) else None
+    return {(normalized_matcher, command) for command in hook_commands(entry)}
+
+
+def claude_is_valid(settings: dict[str, Any]) -> bool:
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for event, desired_entries in CLAUDE_HOOKS.items():
+        existing = hooks.get(event)
+        if not isinstance(existing, list):
+            return False
+        existing_identities = {
+            identity
+            for entry in existing
+            if isinstance(entry, dict)
+            for identity in hook_identities(entry)
+        }
+        desired_identities = {
+            identity
+            for entry in desired_entries
+            for identity in hook_identities(entry)
+        }
+        if not desired_identities <= existing_identities:
+            return False
+    return True
+
+
+def merge_claude_hooks(settings: dict[str, Any]) -> dict[str, Any]:
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("Claude settings key 'hooks' is not an object")
+
+    for event, desired_entries in CLAUDE_HOOKS.items():
+        existing = hooks.setdefault(event, [])
+        if not isinstance(existing, list):
+            raise ValueError(f"Claude hook event '{event}' is not an array")
+        existing_identities = {
+            identity
+            for entry in existing
+            if isinstance(entry, dict)
+            for identity in hook_identities(entry)
+        }
+        for desired in desired_entries:
+            desired_identities = hook_identities(desired)
+            if not desired_identities <= existing_identities:
+                existing.append(desired)
+                existing_identities.update(desired_identities)
+    return settings
+
+
+def repair_codex(path: Path, check_only: bool) -> bool:
+    if not path.exists():
+        return False
+    wait_until_stable(path)
+    raw = path.read_text(encoding="utf-8")
+    if codex_is_valid(raw):
+        return False
+    if check_only:
+        return True
+    atomic_write(path, repaired_codex(raw))
+    return True
+
+
+def repair_claude(path: Path, check_only: bool) -> bool:
+    if not path.exists():
+        return False
+    wait_until_stable(path)
+    raw = path.read_text(encoding="utf-8")
+    settings = json.loads(raw)
+    if not isinstance(settings, dict):
+        raise ValueError("Claude settings root is not an object")
+    if claude_is_valid(settings):
+        return False
+    if check_only:
+        return True
+    merged = merge_claude_hooks(settings)
+    content = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
+    verified = json.loads(content)
+    if not claude_is_valid(verified):
+        raise RuntimeError("generated Claude settings failed validation")
+    atomic_write(path, content)
+    return True
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Restore Codex and Claude ai-notify hooks after config rewrites."
+    )
+    parser.add_argument("--check", action="store_true", help="report drift without changing files")
+    parser.add_argument("--codex-config", type=Path, default=DEFAULT_CODEX_CONFIG)
+    parser.add_argument("--claude-settings", type=Path, default=DEFAULT_CLAUDE_SETTINGS)
+    parser.add_argument("--log-file", type=Path, default=DEFAULT_LOG)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    log = build_logger(args.log_file)
+    try:
+        codex_changed = repair_codex(args.codex_config, args.check)
+        claude_changed = repair_claude(args.claude_settings, args.check)
+    except (OSError, ValueError, RuntimeError, tomllib.TOMLDecodeError, json.JSONDecodeError) as exc:
+        log.error("repair failed: %s", exc)
+        print(f"ai-notify config repair failed: {exc}", file=sys.stderr)
+        return 2
+
+    changed = []
+    if codex_changed:
+        changed.append("codex")
+    if claude_changed:
+        changed.append("claude")
+    if args.check and changed:
+        print(f"ai-notify hook drift detected: {', '.join(changed)}")
+        return 1
+    if changed:
+        log.info("restored hooks: %s", ", ".join(changed))
+        print(f"ai-notify hooks restored: {', '.join(changed)}")
+    else:
+        log.info("hooks already valid")
+        print("ai-notify hooks already valid")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -31,6 +31,8 @@ tmux / Shell 命令 ──────┼──> ai-notify ──> ntfy ──> 
 - Bash
 - Codex CLI、Claude Code 和 tmux 均为可选，按需接入
 
+自动恢复 Codex/Claude Hook 的功能使用标准库 `tomllib`，需要 Python 3.11 或更高版本。旧版 Python 仍可使用核心通知器和 `notify-run`。
+
 不需要安装额外 Python 包。
 
 ## 快速安装
@@ -44,6 +46,8 @@ cd ai-server-notify
 安装器会：
 
 - 安装 `ai-notify` 和 `notify-run` 到 `~/.local/bin`
+- 在 Python 3.11+ 环境安装 `ai-notify-repair-config`
+- 在用户级 systemd 可用时启用配置文件监听，自动恢复被配置管理器覆盖的 Hook
 - 创建权限为 `700` 的配置和状态目录
 - 首次安装时创建权限为 `600` 的配置文件
 - 保留已有配置，不覆盖真实主题或令牌
@@ -132,6 +136,43 @@ Codex 当前的外部 `notify` 事件主要是 `agent-turn-complete`，因此它
 
 参考：[Claude Code Hooks reference](https://code.claude.com/docs/en/hooks)。
 
+## 防止 cc-switch 覆盖 Hook
+
+`cc-switch` 等供应商管理器切换服务时，可能根据供应商模板重新生成 `~/.codex/config.toml` 或 `~/.claude/settings.json`。如果通知 Hook 只手工写在最终文件里，而没有进入管理器模板，下一次切换就会将它删除。
+
+Python 3.11+ 环境运行 `install.sh` 后会安装以下保护：
+
+- `ai-notify-repair-config`：结构化检查 Codex TOML 和 Claude JSON，缺失时只合并通知 Hook，保留其他配置；
+- `ai-notify-config-repair.path`：监听两个配置文件的变化；
+- `ai-notify-config-repair.service`：文件稳定后执行一次幂等修复。
+
+检查当前配置是否漂移：
+
+```bash
+ai-notify-repair-config --check
+```
+
+退出码含义：
+
+- `0`：Hook 完整，或对应客户端尚未创建配置文件；
+- `1`：检测到 Hook 缺失，未修改文件；
+- `2`：配置无效、文件持续写入或修复失败。
+
+手动恢复：
+
+```bash
+ai-notify-repair-config
+```
+
+查看监听和修复日志：
+
+```bash
+systemctl --user status ai-notify-config-repair.path
+tail -f ~/.local/state/ai-notify/repair.log
+```
+
+修复器使用原子替换并保留原文件权限。Codex 配置必须能被 TOML 解析，Claude 配置必须是 JSON 对象；遇到半写入或无效配置时不会猜测改写。已经运行的 Codex/Claude 会话可能缓存启动时配置，修复后应正常结束并重新启动会话。
+
 ## 接入 tmux 长任务
 
 `notify-run` 会运行给定命令，保留原始退出码，并在成功、失败或中断时发送通知：
@@ -196,6 +237,7 @@ ai-notify task STATUS NAME EXIT_CODE ELAPSED_SECONDS
 - “进程仍存在但已经卡住”没有可靠的通用判断标准，需要按任务设置超时或业务心跳。
 - Codex 的 turn complete 与后台训练完成是两个不同事件。
 - 已经运行的任务不会被追溯包装，需要在启动命令中使用 `notify-run`。
+- systemd 监听会在配置写入完成后修复 Hook，改写和修复之间存在很短的窗口；不要在供应商切换尚未结束时立即启动新会话。
 
 ## 测试
 

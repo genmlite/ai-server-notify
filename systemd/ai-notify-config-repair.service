@@ -1,0 +1,9 @@
+[Unit]
+Description=Restore Codex and Claude ai-notify hooks after config rewrites
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ai-notify-repair-config
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077
