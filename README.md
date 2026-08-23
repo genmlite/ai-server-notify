@@ -1,6 +1,6 @@
 # AI 服务器通知
 
-通过 [ntfy](https://ntfy.sh/) 将服务器上的 Codex、Claude Code 和 `tmux` 长任务状态推送到 Windows 通知中心。PowerShell、SSH、VS Code 可以最小化或关闭，不必反复打开终端查看 AI 是否已经完成。
+通过 [ntfy](https://ntfy.sh/) 将服务器上的 Codex、Claude Code、OpenCode 和 `tmux` 长任务状态推送到 Windows 通知中心。PowerShell、SSH、VS Code 可以最小化或关闭，不必反复打开终端查看 AI 是否已经完成。
 
 项目默认只发送主机、项目、时间、短会话号、任务名和退出码，不发送提示词、源代码、日志或完整回答。
 
@@ -13,6 +13,7 @@
 | Claude API 限流、认证或模型错误 | Claude `StopFailure` Hook |
 | Claude 等待权限或用户输入 | `PermissionRequest` / `Notification` Hook |
 | Claude 会话结束 | Claude `SessionEnd` Hook |
+| OpenCode 顶层会话暂停、结束、错误、权限或提问 | OpenCode 全局插件事件 |
 | 训练、评估或脚本成功/失败/中断 | `notify-run` 捕获真实退出码 |
 
 ```text
@@ -83,6 +84,7 @@ python3 -c 'import secrets; print("ai-" + secrets.token_hex(18))'
 - `topic`：相当于订阅密码，不要使用简单名称或提交到 Git。
 - `host_label`：通知中显示的服务器名称；留空时使用系统 hostname。
 - `token`：自建 ntfy 启用认证时填写；公共随机主题通常留空。
+- `notify_subagents`：是否发送明确标记为子 agent 的事件，默认为 `false`。
 
 发送测试：
 
@@ -135,6 +137,20 @@ Codex 当前的外部 `notify` 事件主要是 `agent-turn-complete`，因此它
 重新启动 Claude Code 会话后生效。Claude Code 需要能够从 `PATH` 找到 `ai-notify`；也可以把示例中的命令改成绝对路径。
 
 参考：[Claude Code Hooks reference](https://code.claude.com/docs/en/hooks)。
+
+## 接入 OpenCode
+
+安装器检测到 OpenCode 后，会把插件安装到 `~/.config/opencode/plugins/ai-server-notify.js`。OpenCode 会自动加载全局插件，无需改写现有 `opencode.json`。
+
+插件只通知顶层会话的 `session.idle`、`session.deleted`、`session.error`、权限请求和问题请求；带有 `parentID` 的子 agent 会话会被忽略。通知器不会发送提示词、回答或工具输出。
+
+手动安装或检查：
+
+```bash
+install -d -m 755 ~/.config/opencode/plugins
+install -m 644 integrations/opencode/ai-server-notify.js ~/.config/opencode/plugins/
+opencode debug config
+```
 
 ## 防止 cc-switch 覆盖 Hook
 
@@ -236,6 +252,7 @@ ai-notify task STATUS NAME EXIT_CODE ELAPSED_SECONDS
 - 服务器断电或网络完全中断时，服务器无法主动发出 ntfy 消息。要监控整机掉线，需要 Healthchecks.io、Uptime Kuma 或独立监控机的外部心跳。
 - “进程仍存在但已经卡住”没有可靠的通用判断标准，需要按任务设置超时或业务心跳。
 - Codex 的 turn complete 与后台训练完成是两个不同事件。
+- Codex 官方外部 `notify` 目前只支持 `agent-turn-complete`；若 payload 明确标记为子 agent，本工具默认静默，但无法从未标记的 Codex payload 推断层级。
 - 已经运行的任务不会被追溯包装，需要在启动命令中使用 `notify-run`。
 - systemd 监听会在配置写入完成后修复 Hook，改写和修复之间存在很短的窗口；不要在供应商切换尚未结束时立即启动新会话。
 

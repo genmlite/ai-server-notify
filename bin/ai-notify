@@ -85,11 +85,36 @@ def base_lines(config: dict[str, Any], event: dict[str, Any]) -> list[str]:
     return lines
 
 
+def is_subagent_event(event: dict[str, Any]) -> bool:
+    """Return true only when the producer explicitly identifies a child agent."""
+    truthy = (True, 1, "1", "true", "yes")
+    for key in ("is_subagent", "is-sub-agent", "subagent", "sub_agent"):
+        if event.get(key) in truthy:
+            return True
+    for key in (
+        "agent_id",
+        "parent-id",
+        "parent_id",
+        "parent-thread-id",
+        "parent_thread_id",
+        "parent-session-id",
+        "parent_session_id",
+    ):
+        if event.get(key):
+            return True
+    session = event.get("session")
+    return isinstance(session, dict) and bool(
+        session.get("parentID") or session.get("parent_id")
+    )
+
+
 def describe(
     source: str, args: list[str], config: dict[str, Any]
 ) -> tuple[str, str, int, list[str]]:
     if source == "codex":
         event = read_json(args[0] if args else "{}")
+        if is_subagent_event(event) and not config.get("notify_subagents", False):
+            raise SystemExit(0)
         if event.get("type") not in (None, "agent-turn-complete"):
             raise SystemExit(0)
         return (
@@ -99,8 +124,51 @@ def describe(
             ["robot", "white_check_mark"],
         )
 
+    if source == "opencode":
+        event = read_json(args[0] if args else "{}")
+        if is_subagent_event(event) and not config.get("notify_subagents", False):
+            raise SystemExit(0)
+        event_type = str(event.get("event_type") or event.get("type") or "")
+        session = event.get("session") if isinstance(event.get("session"), dict) else {}
+        event_with_cwd = {
+            **event,
+            "cwd": session.get("directory") or event.get("cwd") or event.get("directory"),
+            "session_id": session.get("id") or event.get("session_id"),
+        }
+        lines = base_lines(config, event_with_cwd)
+        title = str(session.get("title") or "")
+        if title:
+            lines.append(f"Session title: {title[:120]}")
+        if event_type in ("session.idle", "session.status"):
+            status = event.get("status")
+            if isinstance(status, dict) and status.get("type") not in (None, "idle"):
+                lines.append(f"Status: {status.get('type')}")
+            return "OpenCode session paused", "\n".join(lines), 3, ["robot", "hourglass_flowing_sand"]
+        if event_type == "session.deleted":
+            return "OpenCode session ended", "\n".join(lines), 3, ["robot", "stop_sign"]
+        if event_type == "session.error":
+            error = event.get("error")
+            if isinstance(error, dict):
+                error = error.get("name") or error.get("message")
+            if error:
+                lines.append(f"Error: {str(error)[:160]}")
+            return "OpenCode session failed", "\n".join(lines), 5, ["robot", "warning"]
+        if event_type in ("permission.asked", "permission.updated", "permission.v2.asked"):
+            permission = event.get("permission") or event.get("action") or event.get("type_name")
+            if permission:
+                lines.append(f"Permission: {str(permission)[:120]}")
+            return "OpenCode is waiting for permission", "\n".join(lines), 5, ["robot", "lock"]
+        if event_type in ("question.asked", "question.v2.asked"):
+            questions = event.get("questions")
+            if isinstance(questions, list):
+                lines.append(f"Questions: {len(questions)}")
+            return "OpenCode needs your input", "\n".join(lines), 5, ["robot", "question"]
+        raise SystemExit(0)
+
     if source.startswith("claude-"):
         event = stdin_json()
+        if source == "claude-stop" and is_subagent_event(event):
+            raise SystemExit(0)
         lines = base_lines(config, event)
         if source == "claude-stop":
             background = event.get("background_tasks") or []

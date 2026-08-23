@@ -48,6 +48,67 @@ class DescribeTests(unittest.TestCase):
         self.assert_description(description)
         self.assertIn("Session: 12345678", description[1])
 
+    def test_codex_subagent_is_silent(self):
+        payload = {
+            "type": "agent-turn-complete",
+            "cwd": "/srv/demo",
+            "thread-id": "child1234",
+            "parent-thread-id": "parent1234",
+        }
+        with self.assertRaises(SystemExit):
+            MODULE["describe"]("codex", [json.dumps(payload)], self.config)
+
+    def test_malformed_subagent_marker_does_not_crash(self):
+        description = MODULE["describe"](
+            "codex",
+            [json.dumps({"type": "agent-turn-complete", "subagent": {"unknown": True}})],
+            self.config,
+        )
+        self.assertEqual(description[0], "Codex finished a turn")
+
+    def test_opencode_events(self):
+        for event_type, expected in (
+            ("session.idle", "OpenCode session paused"),
+            ("session.deleted", "OpenCode session ended"),
+            ("permission.asked", "OpenCode is waiting for permission"),
+            ("question.asked", "OpenCode needs your input"),
+        ):
+            with self.subTest(event_type=event_type):
+                description = MODULE["describe"](
+                    "opencode",
+                    [
+                        json.dumps(
+                            {
+                                "event_type": event_type,
+                                "session_id": "opencode1234",
+                                "session": {
+                                    "id": "opencode1234",
+                                    "directory": "/srv/demo",
+                                    "title": "Smoke",
+                                },
+                                "questions": [{"question": "Pick one"}],
+                            }
+                        )
+                    ],
+                    self.config,
+                )
+                self.assertEqual(description[0], expected)
+
+    def test_opencode_subagent_is_silent(self):
+        with self.assertRaises(SystemExit):
+            MODULE["describe"](
+                "opencode",
+                [
+                    json.dumps(
+                        {
+                            "event_type": "session.idle",
+                            "session": {"id": "child", "parentID": "parent"},
+                        }
+                    )
+                ],
+                self.config,
+            )
+
     def test_claude_stop(self):
         description = self.describe_stdin(
             "claude-stop",
@@ -61,6 +122,14 @@ class DescribeTests(unittest.TestCase):
         )
         self.assert_description(description)
         self.assertEqual(description[0], "Claude finished a turn")
+
+    def test_claude_subagent_stop_is_silent(self):
+        with patch(
+            "sys.stdin",
+            io.StringIO(json.dumps({"cwd": "/srv/demo", "agent_id": "child-1"})),
+        ):
+            with self.assertRaises(SystemExit):
+                MODULE["describe"]("claude-stop", [], self.config)
 
     def test_claude_background_work(self):
         description = self.describe_stdin(

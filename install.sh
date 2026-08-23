@@ -2,16 +2,24 @@
 set -euo pipefail
 
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+python_bin=$(command -v python3)
 bin_dir="${HOME}/.local/bin"
 config_dir="${HOME}/.config/ai-notify"
 state_dir="${HOME}/.local/state/ai-notify"
 config_file="${config_dir}/config.json"
 systemd_dir="${HOME}/.config/systemd/user"
+opencode_plugin_dir="${HOME}/.config/opencode/plugins"
 
 install -d -m 700 "$config_dir" "$state_dir"
 install -d -m 755 "$bin_dir"
 install -m 755 "${project_dir}/bin/ai-notify" "${bin_dir}/ai-notify"
 install -m 755 "${project_dir}/bin/notify-run" "${bin_dir}/notify-run"
+if [[ -d "${HOME}/.config/opencode" || -x "${HOME}/.opencode/bin/opencode" ]]; then
+  install -d -m 755 "$opencode_plugin_dir"
+  install -m 644 "${project_dir}/integrations/opencode/ai-server-notify.js" \
+    "${opencode_plugin_dir}/ai-server-notify.js"
+  printf 'Installed OpenCode notification plugin in %s\n' "$opencode_plugin_dir"
+fi
 
 if [[ ! -e "$config_file" ]]; then
   install -m 600 "${project_dir}/examples/config.json" "$config_file"
@@ -26,6 +34,8 @@ if python3 -c 'import tomllib' >/dev/null 2>&1; then
   install -m 755 \
     "${project_dir}/bin/ai-notify-repair-config" \
     "${bin_dir}/ai-notify-repair-config"
+  # Pin the repair helper to the interpreter that passed the tomllib check.
+  sed -i "1s|^#!.*|#!${python_bin}|" "${bin_dir}/ai-notify-repair-config"
   install -d -m 755 "$systemd_dir"
   install -m 644 \
     "${project_dir}/systemd/ai-notify-config-repair.service" \

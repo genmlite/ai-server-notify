@@ -2,5 +2,6 @@
   "server_url": "https://ntfy.sh",
   "topic": "replace-with-a-long-random-topic",
   "host_label": "",
-  "token": ""
+  "token": "",
+  "notify_subagents": false
 }
